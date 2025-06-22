@@ -1365,7 +1365,7 @@ export default function Home() {
               <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-green-600 rounded-lg flex items-center justify-center">
                 <span className="text-white font-bold text-xl">☀️</span>
               </div>
-              <h1 className="ml-3 text-2xl font-bold text-gray-900">Solar AI Quote</h1>
+              <h1 className="ml-3 text-2xl font-bold text-gray-900">Solar Wave AI</h1>
             </div>
             <div className="text-sm text-gray-600">
               {step === 1 && "Step 1: AI Roof Analysis"}

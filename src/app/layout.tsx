@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Solar AI Quote - Get Your Instant Solar Analysis",
+  title: "Solar Wave AI - Get Your Instant Solar Analysis",
   description: "AI-powered solar analysis using Google Solar API. Get accurate solar quotes in minutes with real roof analysis and pricing.",
 };
 
