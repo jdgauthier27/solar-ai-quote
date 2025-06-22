@@ -28,6 +28,7 @@ declare global {
           };
         };
         event: {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           clearInstanceListeners: (instance: any) => void;
         };
       };
@@ -112,6 +113,7 @@ export default function Home() {
     const apiKey = 'AIzaSyCddcFWFRf_zoV5IPv_8FhgquGPxSdmI5M';
     console.log('Google Maps API Key:', apiKey);
     
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let autocomplete: any = null;
     let isInitialized = false;
     let pollInterval: NodeJS.Timeout | null = null;
@@ -550,7 +552,7 @@ export default function Home() {
                 AI-Powered <span className="text-blue-600">Solar Analysis</span>
               </h2>
               <p className="text-xl md:text-2xl text-gray-600 mb-8 max-w-4xl mx-auto">
-                Get the most accurate solar quote in minutes using advanced AI and Google's Solar API. 
+                Get the most accurate solar quote in minutes using advanced AI and Google&apos;s Solar API. 
                 No sales calls, no home visits - just instant, precise results.
               </p>
             </div>
@@ -575,7 +577,7 @@ export default function Home() {
                   placeholder="Start typing your address..."
                   ref={addressInputRef}
                 />
-                <p className="text-sm text-gray-500 mt-2">We use Google's address autocomplete for accuracy</p>
+                <p className="text-sm text-gray-500 mt-2">We use Google&apos;s address autocomplete for accuracy</p>
               </div>
               
               <button
