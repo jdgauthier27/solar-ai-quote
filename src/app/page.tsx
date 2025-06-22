@@ -583,7 +583,7 @@ export default function Home() {
     if (step >= 2) {
       calculateSolarSystem();
     }
-  }, [quoteData, step, calculateSolarSystem, panelCount]);
+  }, [quoteData, step, calculateSolarSystem]);
 
   const handleInputChange = (field: keyof QuoteData, value: string | number | boolean) => {
     setQuoteData(prev => ({
@@ -1147,11 +1147,11 @@ export default function Home() {
   }, [dataLayers, solarInsights]);
 
   // Calculate distance between two lat/lng points
-  const calculateDistance = (lat1: number, lng1: number, lat2: number, lng2: number) => {
+  const calculateDistance = useCallback((lat1: number, lng1: number, lat2: number, lng2: number) => {
     const dLat = lat2 - lat1;
     const dLng = lng2 - lng1;
     return Math.sqrt(dLat * dLat + dLng * dLng);
-  };
+  }, []);
 
   // Advanced obstruction detection using mask image data
   const analyzeObstructionMask = useCallback(async (maskUrl: string) => {
