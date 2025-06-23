@@ -577,7 +577,7 @@ export default function Home() {
       efficiency: Math.round(efficiency * 100)
     });
     console.log("Calculating solar system");
-  }, [quoteData, solarInsights]);
+  }, [quoteData, panelCount, solarInsights]);
 
   useEffect(() => {
     if (step >= 2) {
@@ -962,12 +962,23 @@ export default function Home() {
         yearlyEnergyDcKwh: solarInsights.solarPotential.solarPanels[0]?.yearlyEnergyDcKwh || 300
       }));
     } else {
-      const bestSegment = solarInsights.solarPotential.roofSegmentStats.reduce((best, current) => 
-        (current.stats.sunshineQuantiles[8] > best.stats.sunshineQuantiles[8]) ? current : best
-      );
+      // Pick the sunniest roof segment and keep track of its index so downstream
+      // logic knows which segment each panel belongs to.
+      let bestSegmentIndex = 0;
+      let bestSegment = solarInsights.solarPotential.roofSegmentStats[0];
+      solarInsights.solarPotential.roofSegmentStats.forEach((seg, idx) => {
+        if (seg.stats.sunshineQuantiles[8] > bestSegment.stats.sunshineQuantiles[8]) {
+          bestSegment = seg;
+          bestSegmentIndex = idx;
+        }
+      });
+
+      // Attach the index onto the segment object so calculateOptimalPanelPlacement
+      // can propagate it to each generated panel.
+      const segmentWithIndex = { ...bestSegment, segmentIndex: bestSegmentIndex } as any;
 
       const { panelWidthMeters, panelHeightMeters } = solarInsights.solarPotential;
-      const placedPanels = calculateOptimalPanelPlacement(bestSegment, panelWidthMeters, panelHeightMeters);
+      const placedPanels = calculateOptimalPanelPlacement(segmentWithIndex, panelWidthMeters, panelHeightMeters);
       
       const filteredPanels = dataLayers ? filterPanelsForObstructions(placedPanels) : placedPanels;
       
