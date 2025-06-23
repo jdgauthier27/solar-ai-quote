@@ -971,7 +971,16 @@ export default function Home() {
       
       const filteredPanels = dataLayers ? filterPanelsForObstructions(placedPanels) : placedPanels;
       
-      panelsToShow = filteredPanels.slice(0, panelCount);
+      // If panelCount is zero (e.g. user hasn't touched the slider yet) default to showing
+      // a small starter array so that the roof never appears empty. This avoids confusion
+      // where users think the feature is broken when no panels are displayed.
+      let effectiveCount = panelCount;
+      if (!manualPlacementMode && effectiveCount === 0) {
+        // Choose a conservative default – max 20 panels or the total available, whichever is lower.
+        effectiveCount = Math.min(20, filteredPanels.length);
+      }
+      
+      panelsToShow = filteredPanels.slice(0, effectiveCount);
     }
     
     // Determine the maximum possible production from the best panel spot.
@@ -1303,7 +1312,11 @@ export default function Home() {
           segmentIndex: closestSegmentIndex
         };
         
-        setCustomPanels(prev => [...prev, newPanel]);
+        setCustomPanels(prev => {
+          const updated = [...prev, newPanel];
+          setPanelCount(updated.length);
+          return updated;
+        });
         console.log('Added custom panel:', newPanel);
       }
     });
@@ -1395,10 +1408,7 @@ export default function Home() {
       console.log('Updating solar panels...');
       addSolarPanels(mapInstance);
       
-      // Update panel count in manual mode
-      if (manualPlacementMode && customPanels.length !== panelCount) {
-        setPanelCount(customPanels.length);
-      }
+      /* Panel-count sync disabled to prevent infinite re-renders in manual placement mode */
     } else if (mapInstance && !showPanels) {
       // Clear panels if not showing
       if (window.panelMarkers) {
@@ -1408,6 +1418,53 @@ export default function Home() {
       window.panelMarkers = [];
     }
   }, [panelCount, showPanels, solarInsights, mapInstance, addSolarPanels, manualPlacementMode, customPanels]);
+
+  // Re-attach map click listener whenever manual placement mode is toggled
+  useEffect(() => {
+    if (!mapInstanceRef.current) return;
+
+    // Remove any existing click listeners to avoid duplicates
+    window.google.maps.event.clearInstanceListeners(mapInstanceRef.current);
+
+    // Add fresh click listener that has access to the latest state values
+    mapInstanceRef.current.addListener('click', (event: any) => {
+      if (!manualPlacementMode || !solarInsights) return;
+
+      const lat = event.latLng.lat();
+      const lng = event.latLng.lng();
+
+      // Find the closest roof segment to the clicked point
+      let closestSegmentIndex = 0;
+      let minDistance = Infinity;
+
+      solarInsights.solarPotential.roofSegmentStats.forEach((segment, index) => {
+        const distance = calculateDistance(
+          lat,
+          lng,
+          segment.center.latitude,
+          segment.center.longitude
+        );
+        if (distance < minDistance) {
+          minDistance = distance;
+          closestSegmentIndex = index;
+        }
+      });
+
+      // Create a new custom panel at the clicked location
+      const newPanel = {
+        id: `custom-${Date.now()}-${Math.random()}`,
+        lat,
+        lng,
+        segmentIndex: closestSegmentIndex
+      };
+
+      setCustomPanels(prev => {
+        const updated = [...prev, newPanel];
+        setPanelCount(updated.length);
+        return updated;
+      });
+    });
+  }, [manualPlacementMode, solarInsights, calculateDistance]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-green-50">
