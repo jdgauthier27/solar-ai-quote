@@ -217,8 +217,6 @@ export default function Home() {
   const [showPanels, setShowPanels] = useState(true);
   const [manualPlacementMode, setManualPlacementMode] = useState(false);
   const [customPanels, setCustomPanels] = useState<Array<{id: string; lat: number; lng: number; segmentIndex?: number}>>([]);
-  const [currentLayerOverlay, setCurrentLayerOverlay] = useState<any>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [mapInstance, setMapInstance] = useState<any>(null);
   const [isGoogleMapsLoaded, setIsGoogleMapsLoaded] = useState(false);
   
@@ -227,6 +225,7 @@ export default function Home() {
   const mapRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mapInstanceRef = useRef<any>(null);
+  const currentLayerOverlayRef = useRef<any>(null);
 
   // Check if Google APIs are loaded
   useEffect(() => {
@@ -565,7 +564,7 @@ export default function Home() {
       
       efficiency = Math.min(0.95, 0.85 + (avgTilt / 100));
     }
-    
+
     setSolarSystem({
       size: Math.round(systemSize * 10) / 10,
       panels,
@@ -577,13 +576,25 @@ export default function Home() {
       roofArea: Math.round(roofArea),
       efficiency: Math.round(efficiency * 100)
     });
-  }, [quoteData, panelCount, solarInsights]);
+    console.log("Calculating solar system");
+  }, [quoteData, solarInsights]);
 
   useEffect(() => {
     if (step >= 2) {
       calculateSolarSystem();
     }
-  }, [quoteData, step, calculateSolarSystem]);
+  }, [step, calculateSolarSystem]);
+
+  const debouncedCalculate = useCallback(
+    () => {
+      calculateSolarSystem();
+    },
+    [calculateSolarSystem]
+  );
+
+  useEffect(() => {
+    debouncedCalculate();
+  }, [debouncedCalculate]);
 
   const handleInputChange = (field: keyof QuoteData, value: string | number | boolean) => {
     setQuoteData(prev => ({
@@ -646,9 +657,8 @@ export default function Home() {
     console.log(`Switching to layer: ${selectedLayer}`);
     
     // Clear existing overlay if any
-    if (currentLayerOverlay) {
-      currentLayerOverlay.setMap(null);
-      setCurrentLayerOverlay(null);
+    if (currentLayerOverlayRef.current && typeof currentLayerOverlayRef.current.setMap === 'function') {
+      currentLayerOverlayRef.current.setMap(null);
     }
 
     // Reset to satellite view when showing RGB
@@ -716,12 +726,12 @@ export default function Home() {
 
       map.overlayMapTypes.clear();
       map.overlayMapTypes.push(imageMapType);
-      setCurrentLayerOverlay(imageMapType);
+      currentLayerOverlayRef.current = imageMapType;
       console.log(`${layerName} layer added to map with opacity ${opacity}`);
     } else {
       console.warn(`No URL available for layer: ${selectedLayer}`);
     }
-  }, [dataLayers, selectedLayer, currentLayerOverlay]);
+  }, [dataLayers, selectedLayer]);
 
   // Helper function to normalize tile coordinates
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -752,6 +762,183 @@ export default function Home() {
     // Combine factors (azimuth is more important)
     return 0.7 * azimuthFactor + 0.3 * pitchFactor;
   };
+
+  // Calculate distance between two lat/lng points
+  const calculateDistance = useCallback((lat1: number, lng1: number, lat2: number, lng2: number) => {
+    const dLat = lat2 - lat1;
+    const dLng = lng2 - lng1;
+    return Math.sqrt(dLat * dLat + dLng * dLng);
+  }, []);
+
+  const calculateOptimalPanelPlacement = useCallback((roofSegment: any, panelWidth: number, panelHeight: number) => {
+    const { center, boundingBox, pitchDegrees, azimuthDegrees } = roofSegment;
+    const { sw, ne } = boundingBox;
+
+    // Estimate segment dimensions
+    const segmentWidth = (ne.longitude - sw.longitude) * 111320 * Math.cos(center.latitude * Math.PI / 180);
+    const segmentHeight = (ne.latitude - sw.latitude) * 110574;
+
+    const panels = [];
+    const rotation = azimuthDegrees * Math.PI / 180;
+    const cosR = Math.cos(rotation);
+    const sinR = Math.sin(rotation);
+
+    const pitchFactor = Math.cos(pitchDegrees * Math.PI / 180);
+    const effectivePanelHeight = panelHeight * pitchFactor;
+    
+    const numCols = Math.floor(segmentWidth / panelWidth);
+    const numRows = Math.floor(segmentHeight / effectivePanelHeight);
+
+    for (let row = 0; row < numRows; row++) {
+      for (let col = 0; col < numCols; col++) {
+        const x = (col - numCols / 2 + 0.5) * panelWidth;
+        const y = (row - numRows / 2 + 0.5) * effectivePanelHeight;
+
+        const rotatedX = x * cosR - y * sinR;
+        const rotatedY = x * sinR + y * cosR;
+
+        const lng = center.longitude + rotatedX / (111320 * Math.cos(center.latitude * Math.PI / 180));
+        const lat = center.latitude + rotatedY / 110574;
+        
+        panels.push({
+            center: { latitude: lat, longitude: lng },
+            orientation: 'PORTRAIT', 
+            segmentIndex: roofSegment.segmentIndex,
+            yearlyEnergyDcKwh: roofSegment.stats.sunshineQuantiles[8] 
+        });
+      }
+    }
+    return panels;
+  }, []);
+
+  // Filter panels based on roof obstructions and ridges
+  const filterPanelsForObstructions = useCallback((panels: Array<{
+    center: { latitude: number; longitude: number };
+    orientation: string;
+    segmentIndex: number;
+    yearlyEnergyDcKwh: number;
+  }>) => {
+    if (!dataLayers || !solarInsights) return panels;
+
+    console.log(`🔍 Filtering ${panels.length} panels for obstructions and ridges...`);
+    console.log(`📊 Mask URL available: ${dataLayers.maskUrl}`);
+
+    // Enhanced filtering system that accounts for:
+    // 1. Roof segment transitions (ridges)
+    // 2. Panel spacing requirements
+    // 3. Edge buffer zones
+    // 4. Orientation compatibility between segments
+    
+    const filteredPanels = [];
+    const panelSpacing = 1.2; // Minimum spacing in meters between panels (increased for safety)
+    const ridgeBuffer = 2.0; // Buffer from roof ridges in meters (increased)
+    const edgeBuffer = 1.5; // Buffer from roof edges in meters
+    let rejectionReasons: string[] = [];
+    
+    for (let i = 0; i < panels.length; i++) {
+      const panel = panels[i];
+      let shouldInclude = true;
+      let rejectionReason = '';
+      
+      // Check for roof segment transitions (potential ridges)
+      const currentSegment = solarInsights.solarPotential.roofSegmentStats[panel.segmentIndex];
+      if (currentSegment) {
+        // Enhanced ridge detection: check distance and orientation differences
+        for (let j = 0; j < solarInsights.solarPotential.roofSegmentStats.length; j++) {
+          if (j !== panel.segmentIndex) {
+            const otherSegment = solarInsights.solarPotential.roofSegmentStats[j];
+            const distance = calculateDistance(
+              panel.center.latitude, panel.center.longitude,
+              otherSegment.center.latitude, otherSegment.center.longitude
+            );
+            
+            // Convert to approximate meters for better accuracy
+            const distanceMeters = distance * 111000; // 1 degree ≈ 111km
+            
+            if (distanceMeters < ridgeBuffer) {
+              // Check if the segments have significantly different orientations (ridge indicator)
+              const azimuthDiff = Math.abs(currentSegment.azimuthDegrees - otherSegment.azimuthDegrees);
+              const pitchDiff = Math.abs(currentSegment.pitchDegrees - otherSegment.pitchDegrees);
+              
+              // Handle azimuth wraparound (0°/360°)
+              const normalizedAzimuthDiff = Math.min(azimuthDiff, 360 - azimuthDiff);
+              
+              // More stringent ridge detection criteria
+              if (normalizedAzimuthDiff > 45 || pitchDiff > 20) {
+                shouldInclude = false;
+                rejectionReason = `Ridge crossing: ${normalizedAzimuthDiff.toFixed(1)}° azimuth diff, ${pitchDiff.toFixed(1)}° pitch diff`;
+                break;
+              }
+            }
+          }
+        }
+      }
+      
+      // Check spacing from other included panels to avoid overcrowding
+      if (shouldInclude) {
+        for (const includedPanel of filteredPanels) {
+          const distance = calculateDistance(
+            panel.center.latitude, panel.center.longitude,
+            includedPanel.center.latitude, includedPanel.center.longitude
+          );
+          
+          const distanceMeters = distance * 111000;
+          
+          if (distanceMeters < panelSpacing) {
+            shouldInclude = false;
+            rejectionReason = `Too close to another panel: ${distanceMeters.toFixed(2)}m (min: ${panelSpacing}m)`;
+            break;
+          }
+        }
+      }
+      
+      // Check for panels too close to roof segment edges (potential obstruction areas)
+      if (shouldInclude && currentSegment) {
+        // Calculate distance from panel to roof segment center
+        const segmentDistance = calculateDistance(
+          panel.center.latitude, panel.center.longitude,
+          currentSegment.center.latitude, currentSegment.center.longitude
+        );
+        const segmentDistanceMeters = segmentDistance * 111000;
+        
+        // Estimate maximum safe distance from segment center based on segment area
+        // This is a heuristic to avoid panels near roof edges where obstructions are likely
+        const segmentRadius = Math.sqrt(currentSegment.stats.areaMeters2 / Math.PI);
+        const maxSafeDistance = segmentRadius * 0.7; // Stay within 70% of segment radius
+        
+        if (segmentDistanceMeters > maxSafeDistance) {
+          shouldInclude = false;
+          rejectionReason = `Too far from roof segment center: ${segmentDistanceMeters.toFixed(2)}m (max safe: ${maxSafeDistance.toFixed(2)}m)`;
+        }
+      }
+      
+      // Additional check: avoid panels on segments with very steep pitch (potential accessibility issues)
+      if (shouldInclude && currentSegment && currentSegment.pitchDegrees > 45) {
+        shouldInclude = false;
+        rejectionReason = `Roof too steep: ${currentSegment.pitchDegrees.toFixed(1)}° (max recommended: 45°)`;
+      }
+      
+      if (shouldInclude) {
+        filteredPanels.push(panel);
+      } else {
+        rejectionReasons.push(`Panel ${i + 1}: ${rejectionReason}`);
+      }
+    }
+    
+    const rejectedCount = panels.length - filteredPanels.length;
+    console.log(`✅ Panel filtering complete:`);
+    console.log(`   • ${filteredPanels.length} panels approved`);
+    console.log(`   • ${rejectedCount} panels rejected for safety/obstruction reasons`);
+    
+    if (rejectionReasons.length > 0) {
+      console.log(`📋 Rejection details:`, rejectionReasons.slice(0, 5)); // Show first 5 for brevity
+      if (rejectionReasons.length > 5) {
+        console.log(`   ... and ${rejectionReasons.length - 5} more`);
+      }
+    }
+    
+    return filteredPanels;
+  }, [dataLayers, solarInsights, calculateDistance]);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const addSolarPanels = useCallback((map: any) => {
@@ -1017,184 +1204,7 @@ export default function Home() {
         marker.setIcon(orientedPanelIcon); // Return to original oriented icon
       });
     });
-  }, [solarInsights, showPanels, panelCount, dataLayers, manualPlacementMode, customPanels]);
-
-  // Filter panels based on roof obstructions and ridges
-  const filterPanelsForObstructions = useCallback((panels: Array<{
-    center: { latitude: number; longitude: number };
-    orientation: string;
-    segmentIndex: number;
-    yearlyEnergyDcKwh: number;
-  }>) => {
-    if (!dataLayers || !solarInsights) return panels;
-
-    console.log(`🔍 Filtering ${panels.length} panels for obstructions and ridges...`);
-    console.log(`📊 Mask URL available: ${dataLayers.maskUrl}`);
-
-    // Enhanced filtering system that accounts for:
-    // 1. Roof segment transitions (ridges)
-    // 2. Panel spacing requirements
-    // 3. Edge buffer zones
-    // 4. Orientation compatibility between segments
-    
-    const filteredPanels = [];
-    const panelSpacing = 1.2; // Minimum spacing in meters between panels (increased for safety)
-    const ridgeBuffer = 2.0; // Buffer from roof ridges in meters (increased)
-    const edgeBuffer = 1.5; // Buffer from roof edges in meters
-    let rejectionReasons: string[] = [];
-    
-    for (let i = 0; i < panels.length; i++) {
-      const panel = panels[i];
-      let shouldInclude = true;
-      let rejectionReason = '';
-      
-      // Check for roof segment transitions (potential ridges)
-      const currentSegment = solarInsights.solarPotential.roofSegmentStats[panel.segmentIndex];
-      if (currentSegment) {
-        // Enhanced ridge detection: check distance and orientation differences
-        for (let j = 0; j < solarInsights.solarPotential.roofSegmentStats.length; j++) {
-          if (j !== panel.segmentIndex) {
-            const otherSegment = solarInsights.solarPotential.roofSegmentStats[j];
-            const distance = calculateDistance(
-              panel.center.latitude, panel.center.longitude,
-              otherSegment.center.latitude, otherSegment.center.longitude
-            );
-            
-            // Convert to approximate meters for better accuracy
-            const distanceMeters = distance * 111000; // 1 degree ≈ 111km
-            
-            if (distanceMeters < ridgeBuffer) {
-              // Check if the segments have significantly different orientations (ridge indicator)
-              const azimuthDiff = Math.abs(currentSegment.azimuthDegrees - otherSegment.azimuthDegrees);
-              const pitchDiff = Math.abs(currentSegment.pitchDegrees - otherSegment.pitchDegrees);
-              
-              // Handle azimuth wraparound (0°/360°)
-              const normalizedAzimuthDiff = Math.min(azimuthDiff, 360 - azimuthDiff);
-              
-              // More stringent ridge detection criteria
-              if (normalizedAzimuthDiff > 45 || pitchDiff > 20) {
-                shouldInclude = false;
-                rejectionReason = `Ridge crossing: ${normalizedAzimuthDiff.toFixed(1)}° azimuth diff, ${pitchDiff.toFixed(1)}° pitch diff`;
-                break;
-              }
-            }
-          }
-        }
-      }
-      
-      // Check spacing from other included panels to avoid overcrowding
-      if (shouldInclude) {
-        for (const includedPanel of filteredPanels) {
-          const distance = calculateDistance(
-            panel.center.latitude, panel.center.longitude,
-            includedPanel.center.latitude, includedPanel.center.longitude
-          );
-          
-          const distanceMeters = distance * 111000;
-          
-          if (distanceMeters < panelSpacing) {
-            shouldInclude = false;
-            rejectionReason = `Too close to another panel: ${distanceMeters.toFixed(2)}m (min: ${panelSpacing}m)`;
-            break;
-          }
-        }
-      }
-      
-      // Check for panels too close to roof segment edges (potential obstruction areas)
-      if (shouldInclude && currentSegment) {
-        // Calculate distance from panel to roof segment center
-        const segmentDistance = calculateDistance(
-          panel.center.latitude, panel.center.longitude,
-          currentSegment.center.latitude, currentSegment.center.longitude
-        );
-        const segmentDistanceMeters = segmentDistance * 111000;
-        
-        // Estimate maximum safe distance from segment center based on segment area
-        // This is a heuristic to avoid panels near roof edges where obstructions are likely
-        const segmentRadius = Math.sqrt(currentSegment.stats.areaMeters2 / Math.PI);
-        const maxSafeDistance = segmentRadius * 0.7; // Stay within 70% of segment radius
-        
-        if (segmentDistanceMeters > maxSafeDistance) {
-          shouldInclude = false;
-          rejectionReason = `Too far from roof segment center: ${segmentDistanceMeters.toFixed(2)}m (max safe: ${maxSafeDistance.toFixed(2)}m)`;
-        }
-      }
-      
-      // Additional check: avoid panels on segments with very steep pitch (potential accessibility issues)
-      if (shouldInclude && currentSegment && currentSegment.pitchDegrees > 45) {
-        shouldInclude = false;
-        rejectionReason = `Roof too steep: ${currentSegment.pitchDegrees.toFixed(1)}° (max recommended: 45°)`;
-      }
-      
-      if (shouldInclude) {
-        filteredPanels.push(panel);
-      } else {
-        rejectionReasons.push(`Panel ${i + 1}: ${rejectionReason}`);
-      }
-    }
-    
-    const rejectedCount = panels.length - filteredPanels.length;
-    console.log(`✅ Panel filtering complete:`);
-    console.log(`   • ${filteredPanels.length} panels approved`);
-    console.log(`   • ${rejectedCount} panels rejected for safety/obstruction reasons`);
-    
-    if (rejectionReasons.length > 0) {
-      console.log(`📋 Rejection details:`, rejectionReasons.slice(0, 5)); // Show first 5 for brevity
-      if (rejectionReasons.length > 5) {
-        console.log(`   ... and ${rejectionReasons.length - 5} more`);
-      }
-    }
-    
-    return filteredPanels;
-  }, [dataLayers, solarInsights]);
-
-  // Calculate distance between two lat/lng points
-  const calculateDistance = useCallback((lat1: number, lng1: number, lat2: number, lng2: number) => {
-    const dLat = lat2 - lat1;
-    const dLng = lng2 - lng1;
-    return Math.sqrt(dLat * dLat + dLng * dLng);
-  }, []);
-
-  const calculateOptimalPanelPlacement = useCallback((roofSegment: any, panelWidth: number, panelHeight: number) => {
-    const { center, boundingBox, pitchDegrees, azimuthDegrees } = roofSegment;
-    const { sw, ne } = boundingBox;
-
-    // Estimate segment dimensions
-    const segmentWidth = (ne.longitude - sw.longitude) * 111320 * Math.cos(center.latitude * Math.PI / 180);
-    const segmentHeight = (ne.latitude - sw.latitude) * 110574;
-
-    const panels = [];
-    const rotation = azimuthDegrees * Math.PI / 180;
-    const cosR = Math.cos(rotation);
-    const sinR = Math.sin(rotation);
-
-    const pitchFactor = Math.cos(pitchDegrees * Math.PI / 180);
-    const effectivePanelHeight = panelHeight * pitchFactor;
-    
-    const numCols = Math.floor(segmentWidth / panelWidth);
-    const numRows = Math.floor(segmentHeight / effectivePanelHeight);
-
-    for (let row = 0; row < numRows; row++) {
-      for (let col = 0; col < numCols; col++) {
-        const x = (col - numCols / 2 + 0.5) * panelWidth;
-        const y = (row - numRows / 2 + 0.5) * effectivePanelHeight;
-
-        const rotatedX = x * cosR - y * sinR;
-        const rotatedY = x * sinR + y * cosR;
-
-        const lng = center.longitude + rotatedX / (111320 * Math.cos(center.latitude * Math.PI / 180));
-        const lat = center.latitude + rotatedY / 110574;
-        
-        panels.push({
-            center: { latitude: lat, longitude: lng },
-            orientation: 'PORTRAIT', 
-            segmentIndex: roofSegment.segmentIndex,
-            yearlyEnergyDcKwh: roofSegment.stats.sunshineQuantiles[8] 
-        });
-      }
-    }
-    return panels;
-  }, []);
+  }, [solarInsights, showPanels, panelCount, dataLayers, manualPlacementMode, customPanels, calculateOptimalPanelPlacement, filterPanelsForObstructions]);
 
   // Advanced obstruction detection using mask image data
   const analyzeObstructionMask = useCallback(async (maskUrl: string) => {
