@@ -775,13 +775,15 @@ export default function Home() {
         yearlyEnergyDcKwh: solarInsights.solarPotential.solarPanels[0]?.yearlyEnergyDcKwh || 300
       }));
     } else {
-      // Use original Google Solar API panel data for proper roof alignment
-      const allPanels = solarInsights.solarPotential.solarPanels;
+      const bestSegment = solarInsights.solarPotential.roofSegmentStats.reduce((best, current) => 
+        (current.stats.sunshineQuantiles[8] > best.stats.sunshineQuantiles[8]) ? current : best
+      );
+
+      const { panelWidthMeters, panelHeightMeters } = solarInsights.solarPotential;
+      const placedPanels = calculateOptimalPanelPlacement(bestSegment, panelWidthMeters, panelHeightMeters);
       
-      // Filter panels based on obstruction detection if mask data is available
-      const filteredPanels = dataLayers ? filterPanelsForObstructions(allPanels) : allPanels;
+      const filteredPanels = dataLayers ? filterPanelsForObstructions(placedPanels) : placedPanels;
       
-      // Use filtered panels and limit to selected count
       panelsToShow = filteredPanels.slice(0, panelCount);
     }
     
@@ -1151,6 +1153,47 @@ export default function Home() {
     const dLat = lat2 - lat1;
     const dLng = lng2 - lng1;
     return Math.sqrt(dLat * dLat + dLng * dLng);
+  }, []);
+
+  const calculateOptimalPanelPlacement = useCallback((roofSegment: any, panelWidth: number, panelHeight: number) => {
+    const { center, boundingBox, pitchDegrees, azimuthDegrees } = roofSegment;
+    const { sw, ne } = boundingBox;
+
+    // Estimate segment dimensions
+    const segmentWidth = (ne.longitude - sw.longitude) * 111320 * Math.cos(center.latitude * Math.PI / 180);
+    const segmentHeight = (ne.latitude - sw.latitude) * 110574;
+
+    const panels = [];
+    const rotation = azimuthDegrees * Math.PI / 180;
+    const cosR = Math.cos(rotation);
+    const sinR = Math.sin(rotation);
+
+    const pitchFactor = Math.cos(pitchDegrees * Math.PI / 180);
+    const effectivePanelHeight = panelHeight * pitchFactor;
+    
+    const numCols = Math.floor(segmentWidth / panelWidth);
+    const numRows = Math.floor(segmentHeight / effectivePanelHeight);
+
+    for (let row = 0; row < numRows; row++) {
+      for (let col = 0; col < numCols; col++) {
+        const x = (col - numCols / 2 + 0.5) * panelWidth;
+        const y = (row - numRows / 2 + 0.5) * effectivePanelHeight;
+
+        const rotatedX = x * cosR - y * sinR;
+        const rotatedY = x * sinR + y * cosR;
+
+        const lng = center.longitude + rotatedX / (111320 * Math.cos(center.latitude * Math.PI / 180));
+        const lat = center.latitude + rotatedY / 110574;
+        
+        panels.push({
+            center: { latitude: lat, longitude: lng },
+            orientation: 'PORTRAIT', 
+            segmentIndex: roofSegment.segmentIndex,
+            yearlyEnergyDcKwh: roofSegment.stats.sunshineQuantiles[8] 
+        });
+      }
+    }
+    return panels;
   }, []);
 
   // Advanced obstruction detection using mask image data
